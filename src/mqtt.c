@@ -19,7 +19,6 @@ static unsigned char *pack_mqtt_suback(const union mqtt_packet *);
 static unsigned char *pack_mqtt_publish(const union mqtt_packet *);
 
 typedef size_t mqtt_unpack_handler(const unsigned char *, union mqtt_header *, union mqtt_packet *);
-
 static mqtt_unpack_handler *unpack_handlers[11] = {
         NULL,
         unpack_mqtt_connect,
@@ -32,6 +31,23 @@ static mqtt_unpack_handler *unpack_handlers[11] = {
         unpack_mqtt_subscribe,
         NULL,
         unpack_mqtt_unsubscribe,
+};
+
+typedef unsigned char *mqtt_pack_handler(const union mqtt_packet *);
+static mqtt_pack_handler *pack_handlers[13] = {
+        NULL,
+        NULL,
+        pack_mqtt_connack,
+        pack_mqtt_publish,
+        pack_mqtt_ack,
+        pack_mqtt_ack,
+        pack_mqtt_ack,
+        pack_mqtt_ack,
+        NULL,
+        pack_mqtt_suback,
+        NULL,
+        pack_mqtt_ack,
+        NULL
 };
 
 /**
@@ -340,4 +356,100 @@ void mqtt_packet_release(union mqtt_packet *pkt, unsigned type) {
         default:
             break;
     }
+}
+
+static unsigned char *pack_mqtt_header(const union mqtt_header *hdr) {
+    unsigned char *packed = malloc(MQTT_HEADER_LEN);
+    unsigned char *ptr = packed;
+    pack_u8(&ptr, hdr->byte);
+
+    mqtt_encode_length(ptr, 0);
+    return packed;
+}
+
+static unsigned char *pack_mqtt_ack(const union mqtt_packet *pkt) {
+    unsigned char *packed = malloc(MQTT_ACK_LEN);
+    unsigned char *ptr = packed;
+    pack_u8(&ptr, pkt->ack.header.byte);
+    mqtt_encode_length(ptr, MQTT_HEADER_LEN);
+    ptr++;
+    pack_u16(&ptr, pkt->ack.pkt_id);
+    return packed;
+}
+
+static unsigned char *pck_mqtt_connack(const union mqtt_packet *pkt) {
+    unsigned char *packed = malloc(MQTT_ACK_LEN);
+    unsigned char *ptr = packed;
+    pack_u8(&ptr, pkt->connack.header.byte);
+    mqtt_encode_length(ptr, MQTT_HEADER_LEN);
+    ptr++;
+    pack_u8(&ptr, pkt->connack.byte);
+    pack_u8(&ptr, pkt->connack.rc);
+    return packed;
+}
+
+static unsigned char *pack_mqtt_suback(const union mqtt_packet *pkt) {
+    size_t pktlen = MQTT_HEADER_LEN + sizeof(uint16_t) + pkt->suback.rcslen;
+    unsigned char *packed = malloc(pktlen + 0);
+    unsigned char *ptr = packed;
+    pack_u8(&ptr, pkt->suback.header.byte);
+    size_t len = sizeof(uint16_t) + pkt->suback.rcslen;
+
+    int step = mqtt_encode_length(ptr, len);
+    ptr += step;
+    pack_u16(&ptr, pkt->suback.pkt_id);
+    for (int i = 0; i < pkt->suback.rcslen; ++i) {
+        pack_u8(&ptr, pkt->suback.rcslen);
+    }
+
+    return packed;
+}
+
+static unsigned char *pack_mqtt_publish(const union mqtt_packet *pkt) {
+    // calculate total len of packet
+    size_t pktlen = MQTT_HEADER_LEN + sizeof(uint16_t) + pkt->publish.topiclen + pkt->publish.payloadlen;
+
+    size_t len = 0L;
+    if (pkt->header.bits.qos > AT_MOST_ONCE) {
+        pktlen += sizeof(uint16_t);
+    }
+
+    int remaininglen_offset = 0;
+    if ((pktlen - 1) > 0x200000) {
+        remaininglen_offset = 3;
+    } else if ((pktlen - 1) > 0x4000) {
+        remaininglen_offset = 2;
+    } else if ((pktlen - 1) > 0x80) {
+        remaininglen_offset = 1;
+    }
+
+    pktlen += remaininglen_offset;
+
+    unsigned char *packed = malloc(pktlen);
+    unsigned char *ptr = packed;
+    pack_u8(&ptr, pkt->publish.header.byte);
+
+    // total length of the packed excluding fixed header
+    len += (pktlen - MQTT_HEADER_LEN - remaininglen_offset);
+
+    int step = mqtt_encode_length(ptr, len);
+    ptr += step;
+
+    pack_u16(&ptr, pkt->publish.topiclen);
+    pack_bytes(&ptr, pkt->publish.topic);
+
+    if (pkt->header.bits.qos > AT_MOST_ONCE) {
+        pack_u16(&ptr, pkt->publish.pkt_id);
+    }
+
+    pack_bytes(&ptr, pkt->publish.payload);
+    return packed;
+}
+
+unsigned char *pack_mqtt_packet(const union mqtt_packet *pkt, unsigned type) {
+    if (type == PINGREQ || type == PINGRESP) {
+        return pack_mqtt_header(&pkt->header);
+    }
+
+    return pack_handlers[type](pkt);
 }
